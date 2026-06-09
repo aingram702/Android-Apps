@@ -63,8 +63,10 @@ class MainActivity : AppCompatActivity() {
             when (intent.action) {
                 ScanService.ACTION_DEVICE_FOUND -> {
                     val device = buildDeviceFromIntent(intent)
-                    adapter.upsert(device)
-                    adapter.sortByThreat()
+                    val isNew = adapter.upsert(device)
+                    // Only re-sort when a device is first seen — updating an existing device
+                    // doesn't change its threat level, so a full sort+rebind is unnecessary.
+                    if (isNew) adapter.sortByThreat()
                     updateCounters()
                 }
                 ScanService.ACTION_SCAN_STATUS -> {
@@ -104,7 +106,11 @@ class MainActivity : AppCompatActivity() {
             addAction(ScanService.ACTION_DEVICE_FOUND)
             addAction(ScanService.ACTION_SCAN_STATUS)
         }
-        registerReceiver(scanReceiver, filter)
+        // RECEIVER_NOT_EXPORTED ensures this receiver ignores intents from other apps,
+        // preventing intent injection / spoofing of scan results.
+        ContextCompat.registerReceiver(
+            this, scanReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onPause() {
@@ -119,14 +125,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_about -> {
-                showAboutDialog()
-                true
-            }
-            R.id.action_export -> {
-                exportResults()
-                true
-            }
+            R.id.action_about -> { showAboutDialog(); true }
+            R.id.action_export -> { exportResults(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -171,14 +171,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildDeviceFromIntent(intent: Intent): BtDeviceInfo {
+        // Safely parse the threat level — an unexpected value must not crash the app.
+        val threatLevel = try {
+            BtDeviceInfo.ThreatLevel.valueOf(intent.getStringExtra("threat") ?: "UNKNOWN")
+        } catch (_: IllegalArgumentException) {
+            BtDeviceInfo.ThreatLevel.UNKNOWN
+        }
         return BtDeviceInfo(
             address = intent.getStringExtra(ScanService.EXTRA_DEVICE) ?: "",
             name = intent.getStringExtra("name"),
             rssi = intent.getIntExtra("rssi", -100),
             deviceType = intent.getStringExtra("type") ?: "Unknown",
-            threatLevel = BtDeviceInfo.ThreatLevel.valueOf(
-                intent.getStringExtra("threat") ?: "UNKNOWN"
-            ),
+            threatLevel = threatLevel,
             threatReason = intent.getStringExtra("reason") ?: "",
             manufacturer = intent.getStringExtra("manufacturer")?.takeIf { it.isNotBlank() }
         )
@@ -233,7 +237,12 @@ class MainActivity : AppCompatActivity() {
         val csv = buildString {
             appendLine("Name,Address,Type,RSSI,ThreatLevel,Reason,Manufacturer,SeenCount")
             all.forEach { d ->
-                appendLine("\"${d.displayName}\",${d.address},${d.deviceType},${d.rssi},${d.threatLevel.label},\"${d.threatReason}\",\"${d.manufacturer ?: ""}\",${d.seenCount}")
+                // Escape double-quotes per RFC 4180 to prevent CSV injection
+                appendLine(
+                    "\"${d.displayName.escapeCsv()}\",${d.address},${d.deviceType},${d.rssi}," +
+                    "${d.threatLevel.label},\"${d.threatReason.escapeCsv()}\"," +
+                    "\"${(d.manufacturer ?: "").escapeCsv()}\",${d.seenCount}"
+                )
             }
         }
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -243,4 +252,6 @@ class MainActivity : AppCompatActivity() {
         }
         startActivity(Intent.createChooser(shareIntent, "Export scan results"))
     }
+
+    private fun String.escapeCsv() = replace("\"", "\"\"")
 }

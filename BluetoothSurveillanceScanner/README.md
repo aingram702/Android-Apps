@@ -63,38 +63,6 @@ Any device broadcasting with no name (or a generic placeholder) and a signal str
 
 ---
 
-## Screenshots
-
-```
-┌─────────────────────────────────────────┐
-│  BT Surveillance Scanner          [≡]   │
-├─────────────────────────────────────────┤
-│ Devices: 4  │  High Risk: 1  │ Susp: 2  │
-│ Scanning…                               │
-├─────────────────────────────────────────┤
-│ ┌─────────────────────────── HIGH RISK┐ │
-│ │ AirTag                              │ │
-│ │ AC:BC:32:xx:xx:xx          BLE      │ │
-│ │ Apple (AirTag / FindMy)             │ │
-│ │ ─────────────────────────────────  │ │
-│ │ Known tracking device: 'airtag'     │ │
-│ │ ████████░░  -52 dBm (Strong)  Seen 3│ │
-│ └─────────────────────────────────────┘ │
-│ ┌──────────────────────── SUSPICIOUS ┐  │
-│ │ Unknown Device              BLE     │ │
-│ │ A4:C1:38:xx:xx:xx                   │ │
-│ │ Telink Semiconductor (BLE module)   │ │
-│ │ ─────────────────────────────────   │ │
-│ │ MAC matches DIY/cheap BLE module    │ │
-│ │ ██████░░░░  -68 dBm (Medium) Seen 1 │ │
-│ └─────────────────────────────────────┘ │
-│                                         │
-│                        [ Stop Scan ]    │
-└─────────────────────────────────────────┘
-```
-
----
-
 ## Requirements
 
 - Android **6.0 (API 23)** or higher
@@ -175,9 +143,143 @@ BluetoothSurveillanceScanner/
 
 4. **Analysis** — each discovered device is passed to `SurveillanceDetector.analyze()`, which checks the device name against pattern lists and the MAC OUI against a manufacturer table, then assigns a `ThreatLevel`.
 
-5. **Broadcast** — `ScanService` sends a local broadcast with the device data. `MainActivity` receives it and calls `DeviceAdapter.upsert()`, which either adds a new row or updates an existing one in place, then re-sorts by threat level.
+5. **Broadcast** — `ScanService` sends a package-restricted local broadcast with the device data. `MainActivity` receives it and calls `DeviceAdapter.upsert()`, which either adds a new row or updates an existing one in place, then re-sorts by threat level only when a new device arrives.
 
 6. **Alert** — if the threat level is HIGH, `ScanService` also fires a high-priority system notification with vibration.
+
+---
+
+## Security Audit & Remediations
+
+A full code review and security audit was performed after the initial release. The following issues were identified and fixed:
+
+### SEC-1 — Implicit broadcasts exposed device data to all apps
+**Severity:** High  
+**File:** `ScanService.kt`
+
+**Issue:** `sendBroadcast(intent)` without a target package sent Bluetooth device data (MAC addresses, threat levels, signal strength) as a system-wide implicit broadcast. Any app on the device could register a receiver for `com.bluetoothscanner.DEVICE_FOUND` and silently collect the scan results.
+
+**Fix:** `intent.setPackage(packageName)` is now called on every outgoing broadcast, restricting delivery to this app only.
+
+---
+
+### SEC-2 — BroadcastReceiver accepted spoofed intents from other apps
+**Severity:** High  
+**File:** `MainActivity.kt`
+
+**Issue:** `registerReceiver(scanReceiver, filter)` without export restrictions allowed any third-party app to craft a fake `ACTION_DEVICE_FOUND` intent and inject arbitrary device data into the UI, or trigger a denial-of-service via malformed extras.
+
+**Fix:** `ContextCompat.registerReceiver(..., ContextCompat.RECEIVER_NOT_EXPORTED)` is now used, which sets `Context.RECEIVER_NOT_EXPORTED` on API 33+ and falls back safely on older versions. Combined with SEC-1's `setPackage()`, the broadcast channel is now fully private.
+
+---
+
+### SEC-3 — `ThreatLevel.valueOf()` crash via malformed intent extra
+**Severity:** High  
+**File:** `MainActivity.kt` line 179
+
+**Issue:** `BtDeviceInfo.ThreatLevel.valueOf(string)` throws `IllegalArgumentException` if the string doesn't match an enum constant. A spoofed or corrupted intent with `threat="INVALID"` would crash `MainActivity`.
+
+**Fix:** The call is now wrapped in a `try/catch` block that falls back to `ThreatLevel.UNKNOWN` on any parse failure.
+
+---
+
+### SEC-4 — `android:allowBackup="true"` exposed scan history via ADB
+**Severity:** Medium  
+**File:** `AndroidManifest.xml`
+
+**Issue:** With backup enabled, an attacker with USB debugging access (or physical device access) could run `adb backup` to extract any data the app writes to internal storage, including future additions like scan history persistence.
+
+**Fix:** `android:allowBackup="false"` is now set in the manifest.
+
+---
+
+### SEC-5 — Notification ID collisions via `hashCode()`
+**Severity:** Medium  
+**File:** `ScanService.kt` line 183
+
+**Issue:** `NOTIF_ID_ALERT + info.address.hashCode()` produced notification IDs that could be negative (causing unpredictable behaviour on some OEMs) and could collide with the foreground notification ID (`1`) or with other alert notifications, silently replacing a HIGH-risk alert with a different device's alert.
+
+**Fix:** A `alertNotifIds: MutableMap<String, Int>` now assigns stable, sequential integer IDs starting from `1000`, one per unique MAC address.
+
+---
+
+### BUG-1 — `hasBluetoothPermission()` always returned `false` on Android ≤ 11
+**Severity:** High  
+**File:** `ScanService.kt` line 216
+
+**Issue:** The method checked for `BLUETOOTH_SCAN` unconditionally. On API ≤ 30, that permission does not exist, so `checkSelfPermission` always returned `PERMISSION_DENIED`, silently preventing all Bluetooth operations on pre-Android-12 devices — the app appeared to scan but never actually did.
+
+**Fix:** The check now branches on `Build.VERSION.SDK_INT >= Build.VERSION_CODES.S`: API 31+ checks `BLUETOOTH_SCAN`; API 23–30 checks `BLUETOOTH`.
+
+---
+
+### BUG-2 — `isLeScanning` flag corrupted when BLE scanner is unavailable
+**Severity:** Medium  
+**File:** `ScanService.kt` line 106
+
+**Issue:** `leScanner?.startScan(...)` used a null-safe call that silently did nothing if `leScanner` was null (BLE unavailable or adapter off), but `isLeScanning = true` was set unconditionally on the next line. This locked the service into a state where it believed BLE scanning was active but no callback would ever fire, and `startLeScanning()` could never be retried.
+
+**Fix:** The scanner is now unwrapped with `?: return` before the scan starts; `isLeScanning = true` is only reached when the scan actually starts.
+
+---
+
+### BUG-3 — Classic scan receiver double-registration on discovery restart
+**Severity:** Medium  
+**File:** `ScanService.kt` line 117
+
+**Issue:** `startClassicScan()` tried to `unregisterReceiver` before re-registering using a bare `try/catch` with no tracking of whether the receiver was actually registered. This could produce duplicate receiver registrations in certain timing windows and a silent memory leak.
+
+**Fix:** A `classicReceiverRegistered: Boolean` flag now guards all register/unregister calls, guaranteeing exactly one registration at a time.
+
+---
+
+### BUG-4 — CSV injection in exported results
+**Severity:** Low  
+**File:** `MainActivity.kt` line 236
+
+**Issue:** Device names, threat reasons, and manufacturer strings were interpolated directly into CSV fields without escaping. A device with a name containing `"` (e.g., `He said "hello"`) would produce malformed CSV that broke field boundaries and could cause incorrect parsing in spreadsheet software.
+
+**Fix:** An `escapeCsv()` extension is applied to all string fields, replacing `"` with `""` per RFC 4180.
+
+---
+
+### PERF-1 — O(n log n) full sort on every BLE advertisement
+**Severity:** Medium  
+**File:** `MainActivity.kt` / `DeviceAdapter.kt`
+
+**Issue:** `sortByThreat()` (which calls `notifyDataSetChanged()`) was invoked after every single call to `adapter.upsert()`, including updates to already-known devices. With 50+ devices in view and BLE callbacks firing at ~10 Hz, this caused constant full RecyclerView rebinds and visible jank.
+
+**Fix:** `upsert()` now returns `Boolean` (true = new device inserted). `sortByThreat()` is only called when a new device is first seen; updating an existing device uses `notifyItemChanged()` in-place without a re-sort.
+
+---
+
+### PERF-2 — No deduplication of high-frequency BLE advertisements
+**Severity:** Medium  
+**File:** `ScanService.kt`
+
+**Issue:** The same BLE device can advertise many times per second. Each advertisement triggered a broadcast → UI update cycle with no throttling, wasting CPU and causing UI thrashing.
+
+**Fix:** A `lastBroadcastTime: MutableMap<String, Long>` throttle in `broadcastDevice()` suppresses repeat broadcasts for the same MAC address within a 2-second window.
+
+---
+
+### CLEANUP-1 — OUI strings duplicated between sets and `resolveManufacturer()`
+**Severity:** Low  
+**File:** `SurveillanceDetector.kt`
+
+**Issue:** All OUI strings were listed twice: once in `HIGH_RISK_OUI`/`MEDIUM_RISK_OUI` sets and again in the `resolveManufacturer()` when-expression. Adding or correcting an OUI required updating two separate locations.
+
+**Fix:** `OUI_TO_MANUFACTURER: Map<String, String>` is the single source of truth. `resolveManufacturer()` is a one-line map lookup. `HIGH_RISK_OUI` and `MEDIUM_RISK_OUI` remain as explicit sets for fast classification.
+
+---
+
+### CLEANUP-2 — `colorRes` in data model violated separation of concerns
+**Severity:** Low  
+**File:** `BtDeviceInfo.kt`
+
+**Issue:** `ThreatLevel` enum carried a `colorRes: Int` field referencing `android.R.color.*` resources. The data model should not know about Android UI resources; the field was also unused (the adapter used hardcoded hex colors in `bind()`).
+
+**Fix:** `colorRes` removed from the enum. Color mapping lives exclusively in `DeviceAdapter.bind()`.
 
 ---
 
@@ -186,6 +288,7 @@ BluetoothSurveillanceScanner/
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
 - **Classic Bluetooth** discovery takes approximately 12 seconds per cycle and requires the remote device to be in discoverable mode. Many spy devices only use BLE.
 - **MAC OUI matching** is heuristic — the same chip vendor supplies components for both legitimate consumer devices and spy hardware. MEDIUM-risk flags for OUI matches should be investigated, not treated as confirmed.
+- **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure, the FAB may show "Stop Scan" while no scan is actually running. Tapping "Stop Scan" then "Start Scan" will recover the state.
 - **Location permission** is not used for location purposes — Android mandates it for any app that performs Bluetooth scanning on API 23–30.
 - The app does **not** connect to any detected device, only passively observes advertisements and inquiry responses.
 

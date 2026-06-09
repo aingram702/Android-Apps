@@ -5,11 +5,9 @@ import android.graphics.Color
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.cardview.widget.CardView
-import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.bluetoothscanner.surveillance.model.BtDeviceInfo
 
@@ -18,12 +16,16 @@ class DeviceAdapter(
 ) : RecyclerView.Adapter<DeviceAdapter.ViewHolder>() {
 
     private val devices = mutableListOf<BtDeviceInfo>()
-    // address -> list position for O(1) updates
+    // address -> list position for O(1) update lookups
     private val indexMap = mutableMapOf<String, Int>()
 
-    fun upsert(incoming: BtDeviceInfo) {
+    /**
+     * Insert or update a device. Returns true if this was a new device, false if updated.
+     * Callers should only re-sort the list on a true (new device) return value.
+     */
+    fun upsert(incoming: BtDeviceInfo): Boolean {
         val existing = indexMap[incoming.address]
-        if (existing != null) {
+        return if (existing != null) {
             devices[existing] = devices[existing].copy(
                 rssi = incoming.rssi,
                 lastSeen = incoming.lastSeen,
@@ -32,10 +34,12 @@ class DeviceAdapter(
                 threatReason = incoming.threatReason
             )
             notifyItemChanged(existing)
+            false
         } else {
             devices.add(incoming)
             indexMap[incoming.address] = devices.size - 1
             notifyItemInserted(devices.size - 1)
+            true
         }
     }
 
@@ -44,7 +48,6 @@ class DeviceAdapter(
             compareBy<BtDeviceInfo> { it.threatLevel.ordinal }
                 .thenByDescending { it.rssi }
         )
-        // rebuild index map
         indexMap.clear()
         devices.forEachIndexed { i, d -> indexMap[d.address] = i }
         notifyDataSetChanged()
@@ -96,9 +99,9 @@ class DeviceAdapter(
             signalBar.progress = (info.signalBars * 25).coerceIn(0, 100)
 
             val (cardColor, threatTextColor) = when (info.threatLevel) {
-                BtDeviceInfo.ThreatLevel.HIGH -> Pair(Color.parseColor("#FFEBEE"), Color.parseColor("#C62828"))
-                BtDeviceInfo.ThreatLevel.MEDIUM -> Pair(Color.parseColor("#FFF3E0"), Color.parseColor("#E65100"))
-                BtDeviceInfo.ThreatLevel.LOW -> Pair(Color.parseColor("#FFFDE7"), Color.parseColor("#F57F17"))
+                BtDeviceInfo.ThreatLevel.HIGH    -> Pair(Color.parseColor("#FFEBEE"), Color.parseColor("#C62828"))
+                BtDeviceInfo.ThreatLevel.MEDIUM  -> Pair(Color.parseColor("#FFF3E0"), Color.parseColor("#E65100"))
+                BtDeviceInfo.ThreatLevel.LOW     -> Pair(Color.parseColor("#FFFDE7"), Color.parseColor("#F57F17"))
                 BtDeviceInfo.ThreatLevel.UNKNOWN -> Pair(Color.parseColor("#F5F5F5"), Color.parseColor("#616161"))
             }
 
