@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#1B1B2F</color>
+    <color name="colorPrimaryDark">#121212</color>
+    <color name="colorAccent">#1565C0</color>
+    <color name="threat_high">#C62828</color>
+    <color name="threat_medium">#E65100</color>
+    <color name="threat_low">#F57F17</color>
+    <color name="threat_unknown">#616161</color>
+</resources>
