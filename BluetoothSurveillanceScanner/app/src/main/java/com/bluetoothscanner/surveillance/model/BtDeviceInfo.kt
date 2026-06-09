@@ -12,11 +12,12 @@ data class BtDeviceInfo(
     var lastSeen: Long = System.currentTimeMillis(),
     var seenCount: Int = 1
 ) {
-    enum class ThreatLevel(val label: String, val colorRes: Int) {
-        HIGH("HIGH RISK", android.R.color.holo_red_light),
-        MEDIUM("SUSPICIOUS", android.R.color.holo_orange_light),
-        LOW("LOW RISK", android.R.color.holo_orange_dark),
-        UNKNOWN("UNKNOWN", android.R.color.darker_gray)
+    // colorRes removed — UI layer owns color mapping, not the data model
+    enum class ThreatLevel(val label: String) {
+        HIGH("HIGH RISK"),
+        MEDIUM("SUSPICIOUS"),
+        LOW("LOW RISK"),
+        UNKNOWN("UNKNOWN")
     }
 
     val displayName: String
