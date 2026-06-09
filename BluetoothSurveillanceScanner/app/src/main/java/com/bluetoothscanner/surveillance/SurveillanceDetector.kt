@@ -122,7 +122,8 @@ object SurveillanceDetector {
         rssi: Int,
         deviceTypeName: String
     ): BtDeviceInfo {
-        val name = device.name?.trim()
+        // device.name requires BLUETOOTH_CONNECT on API 31+; catch SecurityException defensively
+        val name = try { device.name?.trim() } catch (_: SecurityException) { null }
         val address = device.address?.uppercase() ?: "00:00:00:00:00:00"
         // Guard against malformed MACs shorter than 8 chars
         val oui = if (address.length >= 8) address.take(8) else ""
