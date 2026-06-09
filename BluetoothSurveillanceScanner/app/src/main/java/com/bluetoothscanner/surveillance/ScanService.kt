@@ -21,7 +21,10 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.bluetoothscanner.surveillance.model.BtDeviceInfo
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class ScanService : Service() {
 
@@ -34,10 +37,8 @@ class ScanService : Service() {
         private const val NOTIF_CHANNEL_ID = "bt_scanner_channel"
         private const val NOTIF_CHANNEL_ALERT_ID = "bt_alert_channel"
         private const val NOTIF_ID_FOREGROUND = 1
-        // Alert IDs start at 1000 to avoid collisions with NOTIF_ID_FOREGROUND
         private const val NOTIF_ID_ALERT_BASE = 1000
 
-        // Throttle: suppress repeat broadcasts for the same device within this window
         private const val BROADCAST_THROTTLE_MS = 2_000L
     }
 
@@ -46,12 +47,12 @@ class ScanService : Service() {
     private var isLeScanning = false
     private var isClassicScanning = false
 
-    // Stable per-address notification IDs — avoids hashCode collisions and negative IDs
-    private val alertNotifIds = mutableMapOf<String, Int>()
-    private var nextAlertNotifId = NOTIF_ID_ALERT_BASE
-
-    // Throttle: track last broadcast time per MAC address
-    private val lastBroadcastTime = mutableMapOf<String, Long>()
+    // ConcurrentHashMap + AtomicInteger: both maps are written from the BLE binder thread
+    // AND read/written from the main thread (classicScanReceiver). Plain HashMap is not
+    // thread-safe and causes ConcurrentModificationException under concurrent access.
+    private val alertNotifIds = ConcurrentHashMap<String, Int>()
+    private val nextAlertNotifId = AtomicInteger(NOTIF_ID_ALERT_BASE)
+    private val lastBroadcastTime = ConcurrentHashMap<String, Long>()
 
     private val leScanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -71,7 +72,13 @@ class ScanService : Service() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 BluetoothDevice.ACTION_FOUND -> {
-                    val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                    // Use the API-33+-safe overload to avoid ClassCastException
+                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
                     val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
                     device?.let { processDevice(it, rssi, "Classic") }
                 }
@@ -115,7 +122,6 @@ class ScanService : Service() {
     private fun startLeScanning() {
         if (isLeScanning) return
         if (!hasBluetoothPermission()) return
-        // Guard: BLE may not be available if adapter is off or hardware is missing
         val scanner = leScanner ?: run {
             broadcastStatus("BLE scanner unavailable")
             return
@@ -140,11 +146,15 @@ class ScanService : Service() {
             addAction(BluetoothDevice.ACTION_FOUND)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
         }
-        // Unregister first to avoid duplicate registrations across restart cycles
         if (classicReceiverRegistered) {
             try { unregisterReceiver(classicScanReceiver) } catch (_: Exception) {}
         }
-        registerReceiver(classicScanReceiver, filter)
+        // RECEIVER_NOT_EXPORTED is required on API 33+ for any dynamic receiver,
+        // including those that listen to system broadcasts. ContextCompat handles
+        // the API-level difference transparently.
+        ContextCompat.registerReceiver(
+            this, classicScanReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         classicReceiverRegistered = true
         bluetoothAdapter?.startDiscovery()
         isClassicScanning = true
@@ -167,14 +177,11 @@ class ScanService : Service() {
     }
 
     private fun broadcastDevice(info: BtDeviceInfo) {
-        // Throttle: skip if we broadcast this device recently to avoid UI thrashing
         val now = System.currentTimeMillis()
         val lastSent = lastBroadcastTime[info.address] ?: 0L
         if (now - lastSent < BROADCAST_THROTTLE_MS) return
         lastBroadcastTime[info.address] = now
 
-        // setPackage restricts delivery to this app only — prevents other apps
-        // from snooping device data via the implicit broadcast
         val intent = Intent(ACTION_DEVICE_FOUND).apply {
             setPackage(packageName)
             putExtra(EXTRA_DEVICE, info.address)
@@ -214,8 +221,7 @@ class ScanService : Service() {
             .setContentIntent(launchIntent)
             .setAutoCancel(true)
             .build()
-        // Use a stable per-address ID to avoid hashCode collisions and negative IDs
-        val notifId = alertNotifIds.getOrPut(info.address) { nextAlertNotifId++ }
+        val notifId = alertNotifIds.getOrPut(info.address) { nextAlertNotifId.getAndIncrement() }
         notifManager.notify(notifId, notification)
     }
 
@@ -223,15 +229,11 @@ class ScanService : Service() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         val scanChannel = NotificationChannel(
-            NOTIF_CHANNEL_ID,
-            "BT Scanner",
-            NotificationManager.IMPORTANCE_LOW
+            NOTIF_CHANNEL_ID, "BT Scanner", NotificationManager.IMPORTANCE_LOW
         ).apply { description = "Background Bluetooth scanning status" }
 
         val alertChannel = NotificationChannel(
-            NOTIF_CHANNEL_ALERT_ID,
-            "Surveillance Alerts",
-            NotificationManager.IMPORTANCE_HIGH
+            NOTIF_CHANNEL_ALERT_ID, "Surveillance Alerts", NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Alerts when surveillance devices are detected"
             enableVibration(true)
@@ -249,8 +251,6 @@ class ScanService : Service() {
         .setOngoing(true)
         .build()
 
-    // Check the correct permission for the running API level:
-    // BLUETOOTH_SCAN was introduced in API 31 (Android 12); older devices use BLUETOOTH.
     private fun hasBluetoothPermission(): Boolean {
         val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Manifest.permission.BLUETOOTH_SCAN
