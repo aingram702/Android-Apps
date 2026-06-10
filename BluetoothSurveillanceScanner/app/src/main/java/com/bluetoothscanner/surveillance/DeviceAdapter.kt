@@ -20,21 +20,29 @@ class DeviceAdapter(
     private val indexMap = mutableMapOf<String, Int>()
 
     /**
-     * Insert or update a device. Returns true if this was a new device, false if updated.
-     * Callers should only re-sort the list on a true (new device) return value.
+     * Insert or update a device. Returns true when the list may need re-sorting:
+     * a brand-new device, or an existing device whose threat level changed.
      */
     fun upsert(incoming: BtDeviceInfo): Boolean {
         val existing = indexMap[incoming.address]
         return if (existing != null) {
-            devices[existing] = devices[existing].copy(
+            val current = devices[existing]
+            // A later advertisement may omit the name the HIGH/MEDIUM classification
+            // was based on — never let the threat level silently downgrade.
+            // (ThreatLevel ordinal 0 = HIGH is the most severe.)
+            val best = if (incoming.threatLevel.ordinal <= current.threatLevel.ordinal) incoming else current
+            devices[existing] = current.copy(
+                name = incoming.name ?: current.name,
+                deviceType = incoming.deviceType,
+                manufacturer = incoming.manufacturer ?: current.manufacturer,
                 rssi = incoming.rssi,
                 lastSeen = incoming.lastSeen,
-                seenCount = devices[existing].seenCount + 1,
-                threatLevel = incoming.threatLevel,
-                threatReason = incoming.threatReason
+                seenCount = current.seenCount + 1,
+                threatLevel = best.threatLevel,
+                threatReason = best.threatReason
             )
             notifyItemChanged(existing)
-            false
+            best.threatLevel != current.threatLevel
         } else {
             devices.add(incoming)
             indexMap[incoming.address] = devices.size - 1

