@@ -27,27 +27,30 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: DeviceAdapter
     private var isScanning = false
 
-    private val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-    } else {
-        arrayOf(
-            Manifest.permission.BLUETOOTH,
-            Manifest.permission.BLUETOOTH_ADMIN,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-    }
+    private val requiredPermissions: Array<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            add(Manifest.permission.BLUETOOTH)
+            add(Manifest.permission.BLUETOOTH_ADMIN)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        // Required on Android 13+ to display any notification, including the
+        // foreground-service notification and HIGH RISK alerts.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }.toTypedArray()
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         if (results.values.all { it }) {
-            startScanning()
+            checkPermissionsAndScan()
         } else {
-            Toast.makeText(this, "Bluetooth permissions required to scan", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Bluetooth, location, and notification permissions are required to scan", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -97,6 +100,12 @@ class MainActivity : AppCompatActivity() {
             updateCounters()
         }
 
+        // Recover the correct UI state if the service is already running
+        // (e.g. after a screen rotation recreates this activity).
+        isScanning = ScanService.isRunning
+        if (isScanning) {
+            binding.tvStatus.text = "Scanning for surveillance devices…"
+        }
         updateFabLabel()
     }
 
@@ -132,17 +141,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsAndScan() {
+        // Permissions must be requested before ACTION_REQUEST_ENABLE: on API 31+,
+        // launching that intent without BLUETOOTH_CONNECT throws a SecurityException.
+        val missing = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+            return
+        }
         val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val btAdapter = btManager.adapter
         if (btAdapter == null || !btAdapter.isEnabled) {
             enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             return
         }
-        val missing = requiredPermissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isEmpty()) startScanning()
-        else permissionLauncher.launch(missing.toTypedArray())
+        startScanning()
     }
 
     private fun startScanning() {

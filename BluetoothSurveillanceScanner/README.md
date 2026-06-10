@@ -71,6 +71,7 @@ Any device broadcasting with no name (or a generic placeholder) and a signal str
   - `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (Android 12+)
   - `BLUETOOTH` + `BLUETOOTH_ADMIN` (Android 6–11)
   - `ACCESS_FINE_LOCATION` (required by Android for BLE scanning on API 23–30)
+  - `POST_NOTIFICATIONS` (Android 13+, required to show the scan status and HIGH RISK alert notifications)
 
 ---
 
@@ -283,12 +284,90 @@ A full code review and security audit was performed after the initial release. T
 
 ---
 
+## Second Review Pass — Additional Fixes
+
+A follow-up code review (after the initial crash-fix round) found and fixed the following issues:
+
+### CRASH-4 — `SecurityException` on first launch with Bluetooth off (Android 12+)
+**Severity:** Critical  
+**File:** `MainActivity.kt`
+
+**Issue:** `checkPermissionsAndScan()` checked `btAdapter.isEnabled` and launched `ACTION_REQUEST_ENABLE` *before* requesting runtime permissions. On API 31+, starting the Bluetooth-enable system dialog requires `BLUETOOTH_CONNECT`. On a fresh install with Bluetooth off — the most common first-run state — tapping "Start Scan" threw a `SecurityException` and crashed the app immediately, before the permission prompt was ever shown.
+
+**Fix:** `checkPermissionsAndScan()` now requests any missing runtime permissions first and returns; only once all permissions are granted does it check whether Bluetooth is enabled and prompt to enable it. The permission-result callback re-invokes `checkPermissionsAndScan()` (rather than calling `startScanning()` directly) so the Bluetooth-enabled check still runs afterward.
+
+---
+
+### UI-1 — High-risk threat badge text invisible (and badge color misleading for all levels)
+**Severity:** Medium  
+**File:** `DeviceAdapter.kt` / `bg_badge.xml`
+
+**Issue:** `tv_threat_level`'s background (`bg_badge.xml`) is a solid `#C62828` (red) shape, but `bind()` only changed the badge's *text* color per threat level — it never changed the background. For a HIGH RISK device, the text color was also `#C62828`, making the "HIGH RISK" label completely invisible against its own background. For MEDIUM/LOW/UNKNOWN devices, the badge still rendered with the same red "high risk" background regardless of actual threat level, which was visually misleading.
+
+**Fix:** `bind()` now applies `tvThreat.backgroundTintList` using the same per-threat-level color used for the signal bar, and sets the badge text to white for contrast against all four threat colors.
+
+---
+
+### CONC-1 — Non-atomic `getOrPut` on `ConcurrentHashMap` could assign duplicate alert IDs
+**Severity:** Low  
+**File:** `ScanService.kt`
+
+**Issue:** `sendHighRiskAlert()` used `alertNotifIds.getOrPut(info.address) { ... }`. Kotlin's `getOrPut` extension is a plain get-then-put and is **not atomic**, even on a `ConcurrentHashMap`. If the same high-risk device was detected by the BLE and Classic scan callbacks at nearly the same time (on different threads), both could miss the cached ID, each allocate a new sequential ID via `nextAlertNotifId.getAndIncrement()`, and overwrite each other's map entry — resulting in two different notification IDs (and two separate alert notifications) for the same device.
+
+**Fix:** Replaced with `alertNotifIds.computeIfAbsent(info.address) { ... }`, which is guaranteed atomic on `ConcurrentHashMap`.
+
+---
+
+## Third Review Pass — Additional Fixes
+
+### CRASH-5 — Missing `POST_NOTIFICATIONS` permission silently disabled all notifications on Android 13+
+**Severity:** Critical  
+**File:** `AndroidManifest.xml` / `MainActivity.kt`
+
+**Issue:** Neither the manifest nor `requiredPermissions` declared/requested `android.permission.POST_NOTIFICATIONS`. On Android 13+ (API 33+), this runtime permission is required to display *any* notification — including the persistent foreground-service notification and, critically, the HIGH RISK alert notifications that are the app's headline feature. Without it, `NotificationManager.notify()` silently does nothing (no crash, no error), so the app appeared to scan normally but never alerted the user to a detected tracker.
+
+**Fix:** Added `<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />` to the manifest and added `Manifest.permission.POST_NOTIFICATIONS` to `requiredPermissions` (guarded by `Build.VERSION_CODES.TIRAMISU`), so it's requested in the same runtime permission batch as the Bluetooth/location permissions.
+
+---
+
+### BUILD-1 — Missing Gradle wrapper meant `./gradlew` (as documented) did not exist
+**Severity:** High  
+**File:** project root
+
+**Issue:** The README's build instructions (`./gradlew assembleDebug`, `./gradlew installDebug`) referenced the Gradle wrapper, but `gradlew`, `gradlew.bat`, and `gradle/wrapper/gradle-wrapper.jar` were never committed — only `gradle-wrapper.properties` existed. Running the documented commands would fail with "No such file or directory".
+
+**Fix:** Generated and committed the Gradle 8.2 wrapper scripts and jar (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`), so the project builds with the documented commands out of the box.
+
+---
+
+## Fourth Review Pass — Additional Fixes
+
+### BUG-7 — FAB/status UI desynced from the running service after activity recreation
+**Severity:** Medium  
+**File:** `MainActivity.kt` / `ScanService.kt`
+
+**Issue:** `MainActivity` tracked scan state purely in the local `isScanning` field, initialized to `false`. The `ScanService` is a separate component that keeps running across activity recreations (e.g. screen rotation, returning to the app after it was backgrounded and the activity was destroyed). When `MainActivity` was recreated while `ScanService` was still active, `isScanning` reset to `false`, so the FAB showed "Start Scan" and the status text was blank — even though scanning was actively running in the background. Tapping "Start Scan" in this state would call `checkPermissionsAndScan()` → `startScanning()` again, redundantly restarting the foreground service.
+
+**Fix:** Added a `@Volatile companion var isRunning` flag to `ScanService`, set to `true` in `onCreate()` and `false` in `onDestroy()`. `MainActivity.onCreate()` now initializes `isScanning = ScanService.isRunning` and restores the "Scanning for surveillance devices…" status text when the service is already running, so the FAB and status correctly reflect the real service state immediately after recreation.
+
+---
+
+### BUG-8 — Toggling Bluetooth off and back on permanently stalled scanning
+**Severity:** High  
+**File:** `ScanService.kt`
+
+**Issue:** `startLeScanning()` and `startClassicScan()` both early-return if `isLeScanning` / scanning is already considered active, and `BluetoothLeScanner.startScan()` simply does nothing once the adapter is off. If the user turned Bluetooth off (e.g. from Quick Settings) while `ScanService` was running, the OS silently stopped both the BLE scan and Classic discovery, but `isLeScanning` and `isClassicScanning` remained `true`. When Bluetooth was turned back on, nothing in the service re-triggered scanning — `startLeScanning()`'s early-return blocked any restart, and Classic discovery was never resumed — so the foreground notification kept showing "Scanning…" while no scanning was actually happening, with no way to recover short of stopping and restarting the service.
+
+**Fix:** Added a `bluetoothStateReceiver` registered on `BluetoothAdapter.ACTION_STATE_CHANGED` (via `ContextCompat.registerReceiver(..., RECEIVER_NOT_EXPORTED)`). On `STATE_OFF` it resets `isLeScanning`/`isClassicScanning` to `false` and posts a status update. On `STATE_ON` it refreshes the `BluetoothLeScanner` reference and calls `startLeScanning()` / `startClassicScan()` again, restoring full scanning automatically. The receiver is registered in `onCreate()` and unregistered in `onDestroy()` alongside the existing Classic-scan receiver.
+
+---
+
 ## Limitations & Notes
 
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
 - **Classic Bluetooth** discovery takes approximately 12 seconds per cycle and requires the remote device to be in discoverable mode. Many spy devices only use BLE.
 - **MAC OUI matching** is heuristic — the same chip vendor supplies components for both legitimate consumer devices and spy hardware. MEDIUM-risk flags for OUI matches should be investigated, not treated as confirmed.
-- **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure, the FAB may show "Stop Scan" while no scan is actually running. Tapping "Stop Scan" then "Start Scan" will recover the state.
+- **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure (rather than the activity being recreated), the FAB may still show "Stop Scan" while no scan is actually running, since `ScanService.isRunning` would also be reset to `false` only if `onDestroy()` runs. Tapping "Stop Scan" then "Start Scan" will recover the state.
 - **Location permission** is not used for location purposes — Android mandates it for any app that performs Bluetooth scanning on API 23–30.
 - The app does **not** connect to any detected device, only passively observes advertisements and inquiry responses.
 

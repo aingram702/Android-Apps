@@ -40,6 +40,12 @@ class ScanService : Service() {
         private const val NOTIF_ID_ALERT_BASE = 1000
 
         private const val BROADCAST_THROTTLE_MS = 2_000L
+
+        // Lets MainActivity recover the correct FAB/status state after being
+        // recreated (e.g. screen rotation) while the service keeps running.
+        @Volatile
+        var isRunning = false
+            private set
     }
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -89,14 +95,42 @@ class ScanService : Service() {
         }
     }
 
+    // If the user toggles Bluetooth off and back on while the service is running,
+    // the OS silently stops both scans. Without this receiver, isLeScanning would
+    // stay true forever and startLeScanning()'s early-return would block any restart.
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                BluetoothAdapter.STATE_OFF -> {
+                    isLeScanning = false
+                    isClassicScanning = false
+                    broadcastStatus("Bluetooth turned off — scanning paused")
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    leScanner = bluetoothAdapter?.bluetoothLeScanner
+                    startLeScanning()
+                    startClassicScan()
+                    broadcastStatus("Bluetooth re-enabled — scanning resumed")
+                }
+            }
+        }
+    }
+
     private var classicReceiverRegistered = false
+    private var bluetoothStateReceiverRegistered = false
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = btManager.adapter
         leScanner = bluetoothAdapter?.bluetoothLeScanner
         createNotificationChannels()
+        ContextCompat.registerReceiver(
+            this, bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        bluetoothStateReceiverRegistered = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -108,11 +142,16 @@ class ScanService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         stopLeScanning()
         stopClassicScan()
         if (classicReceiverRegistered) {
             try { unregisterReceiver(classicScanReceiver) } catch (_: Exception) {}
             classicReceiverRegistered = false
+        }
+        if (bluetoothStateReceiverRegistered) {
+            try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
+            bluetoothStateReceiverRegistered = false
         }
         super.onDestroy()
     }
@@ -221,7 +260,9 @@ class ScanService : Service() {
             .setContentIntent(launchIntent)
             .setAutoCancel(true)
             .build()
-        val notifId = alertNotifIds.getOrPut(info.address) { nextAlertNotifId.getAndIncrement() }
+        // computeIfAbsent is atomic on ConcurrentHashMap; getOrPut is not and can race
+        // when the same device is detected by the BLE and Classic scan threads at once.
+        val notifId = alertNotifIds.computeIfAbsent(info.address) { nextAlertNotifId.getAndIncrement() }
         notifManager.notify(notifId, notification)
     }
 
