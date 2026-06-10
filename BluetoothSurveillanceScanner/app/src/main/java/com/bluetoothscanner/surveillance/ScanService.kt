@@ -221,7 +221,9 @@ class ScanService : Service() {
             .setContentIntent(launchIntent)
             .setAutoCancel(true)
             .build()
-        val notifId = alertNotifIds.getOrPut(info.address) { nextAlertNotifId.getAndIncrement() }
+        // computeIfAbsent is atomic on ConcurrentHashMap; getOrPut is not and can race
+        // when the same device is detected by the BLE and Classic scan threads at once.
+        val notifId = alertNotifIds.computeIfAbsent(info.address) { nextAlertNotifId.getAndIncrement() }
         notifManager.notify(notifId, notification)
     }
 

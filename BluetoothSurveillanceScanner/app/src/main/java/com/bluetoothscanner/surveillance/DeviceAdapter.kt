@@ -98,7 +98,7 @@ class DeviceAdapter(
 
             signalBar.progress = (info.signalBars * 25).coerceIn(0, 100)
 
-            val (cardColor, threatTextColor) = when (info.threatLevel) {
+            val (cardColor, threatColor) = when (info.threatLevel) {
                 BtDeviceInfo.ThreatLevel.HIGH    -> Pair(Color.parseColor("#FFEBEE"), Color.parseColor("#C62828"))
                 BtDeviceInfo.ThreatLevel.MEDIUM  -> Pair(Color.parseColor("#FFF3E0"), Color.parseColor("#E65100"))
                 BtDeviceInfo.ThreatLevel.LOW     -> Pair(Color.parseColor("#FFFDE7"), Color.parseColor("#F57F17"))
@@ -106,8 +106,12 @@ class DeviceAdapter(
             }
 
             card.setCardBackgroundColor(cardColor)
-            tvThreat.setTextColor(threatTextColor)
-            signalBar.progressTintList = ColorStateList.valueOf(threatTextColor)
+            // Tint the badge background per threat level — bg_badge is solid #C62828,
+            // so without this the HIGH-risk badge text was invisible (same color as background)
+            // and every other level showed a misleading red "HIGH RISK"-style badge.
+            tvThreat.backgroundTintList = ColorStateList.valueOf(threatColor)
+            tvThreat.setTextColor(Color.WHITE)
+            signalBar.progressTintList = ColorStateList.valueOf(threatColor)
 
             card.setOnClickListener { onItemClick(info) }
         }

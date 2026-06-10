@@ -45,7 +45,7 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         if (results.values.all { it }) {
-            startScanning()
+            checkPermissionsAndScan()
         } else {
             Toast.makeText(this, "Bluetooth permissions required to scan", Toast.LENGTH_LONG).show()
         }
@@ -132,17 +132,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsAndScan() {
+        // Permissions must be requested before ACTION_REQUEST_ENABLE: on API 31+,
+        // launching that intent without BLUETOOTH_CONNECT throws a SecurityException.
+        val missing = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+            return
+        }
         val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val btAdapter = btManager.adapter
         if (btAdapter == null || !btAdapter.isEnabled) {
             enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             return
         }
-        val missing = requiredPermissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isEmpty()) startScanning()
-        else permissionLauncher.launch(missing.toTypedArray())
+        startScanning()
     }
 
     private fun startScanning() {

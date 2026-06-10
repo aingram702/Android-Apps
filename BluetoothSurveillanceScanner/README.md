@@ -283,6 +283,40 @@ A full code review and security audit was performed after the initial release. T
 
 ---
 
+## Second Review Pass — Additional Fixes
+
+A follow-up code review (after the initial crash-fix round) found and fixed the following issues:
+
+### CRASH-4 — `SecurityException` on first launch with Bluetooth off (Android 12+)
+**Severity:** Critical  
+**File:** `MainActivity.kt`
+
+**Issue:** `checkPermissionsAndScan()` checked `btAdapter.isEnabled` and launched `ACTION_REQUEST_ENABLE` *before* requesting runtime permissions. On API 31+, starting the Bluetooth-enable system dialog requires `BLUETOOTH_CONNECT`. On a fresh install with Bluetooth off — the most common first-run state — tapping "Start Scan" threw a `SecurityException` and crashed the app immediately, before the permission prompt was ever shown.
+
+**Fix:** `checkPermissionsAndScan()` now requests any missing runtime permissions first and returns; only once all permissions are granted does it check whether Bluetooth is enabled and prompt to enable it. The permission-result callback re-invokes `checkPermissionsAndScan()` (rather than calling `startScanning()` directly) so the Bluetooth-enabled check still runs afterward.
+
+---
+
+### UI-1 — High-risk threat badge text invisible (and badge color misleading for all levels)
+**Severity:** Medium  
+**File:** `DeviceAdapter.kt` / `bg_badge.xml`
+
+**Issue:** `tv_threat_level`'s background (`bg_badge.xml`) is a solid `#C62828` (red) shape, but `bind()` only changed the badge's *text* color per threat level — it never changed the background. For a HIGH RISK device, the text color was also `#C62828`, making the "HIGH RISK" label completely invisible against its own background. For MEDIUM/LOW/UNKNOWN devices, the badge still rendered with the same red "high risk" background regardless of actual threat level, which was visually misleading.
+
+**Fix:** `bind()` now applies `tvThreat.backgroundTintList` using the same per-threat-level color used for the signal bar, and sets the badge text to white for contrast against all four threat colors.
+
+---
+
+### CONC-1 — Non-atomic `getOrPut` on `ConcurrentHashMap` could assign duplicate alert IDs
+**Severity:** Low  
+**File:** `ScanService.kt`
+
+**Issue:** `sendHighRiskAlert()` used `alertNotifIds.getOrPut(info.address) { ... }`. Kotlin's `getOrPut` extension is a plain get-then-put and is **not atomic**, even on a `ConcurrentHashMap`. If the same high-risk device was detected by the BLE and Classic scan callbacks at nearly the same time (on different threads), both could miss the cached ID, each allocate a new sequential ID via `nextAlertNotifId.getAndIncrement()`, and overwrite each other's map entry — resulting in two different notification IDs (and two separate alert notifications) for the same device.
+
+**Fix:** Replaced with `alertNotifIds.computeIfAbsent(info.address) { ... }`, which is guaranteed atomic on `ConcurrentHashMap`.
+
+---
+
 ## Limitations & Notes
 
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
