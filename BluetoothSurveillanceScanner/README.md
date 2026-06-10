@@ -71,6 +71,7 @@ Any device broadcasting with no name (or a generic placeholder) and a signal str
   - `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (Android 12+)
   - `BLUETOOTH` + `BLUETOOTH_ADMIN` (Android 6–11)
   - `ACCESS_FINE_LOCATION` (required by Android for BLE scanning on API 23–30)
+  - `POST_NOTIFICATIONS` (Android 13+, required to show the scan status and HIGH RISK alert notifications)
 
 ---
 
@@ -314,6 +315,28 @@ A follow-up code review (after the initial crash-fix round) found and fixed the 
 **Issue:** `sendHighRiskAlert()` used `alertNotifIds.getOrPut(info.address) { ... }`. Kotlin's `getOrPut` extension is a plain get-then-put and is **not atomic**, even on a `ConcurrentHashMap`. If the same high-risk device was detected by the BLE and Classic scan callbacks at nearly the same time (on different threads), both could miss the cached ID, each allocate a new sequential ID via `nextAlertNotifId.getAndIncrement()`, and overwrite each other's map entry — resulting in two different notification IDs (and two separate alert notifications) for the same device.
 
 **Fix:** Replaced with `alertNotifIds.computeIfAbsent(info.address) { ... }`, which is guaranteed atomic on `ConcurrentHashMap`.
+
+---
+
+## Third Review Pass — Additional Fixes
+
+### CRASH-5 — Missing `POST_NOTIFICATIONS` permission silently disabled all notifications on Android 13+
+**Severity:** Critical  
+**File:** `AndroidManifest.xml` / `MainActivity.kt`
+
+**Issue:** Neither the manifest nor `requiredPermissions` declared/requested `android.permission.POST_NOTIFICATIONS`. On Android 13+ (API 33+), this runtime permission is required to display *any* notification — including the persistent foreground-service notification and, critically, the HIGH RISK alert notifications that are the app's headline feature. Without it, `NotificationManager.notify()` silently does nothing (no crash, no error), so the app appeared to scan normally but never alerted the user to a detected tracker.
+
+**Fix:** Added `<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />` to the manifest and added `Manifest.permission.POST_NOTIFICATIONS` to `requiredPermissions` (guarded by `Build.VERSION_CODES.TIRAMISU`), so it's requested in the same runtime permission batch as the Bluetooth/location permissions.
+
+---
+
+### BUILD-1 — Missing Gradle wrapper meant `./gradlew` (as documented) did not exist
+**Severity:** High  
+**File:** project root
+
+**Issue:** The README's build instructions (`./gradlew assembleDebug`, `./gradlew installDebug`) referenced the Gradle wrapper, but `gradlew`, `gradlew.bat`, and `gradle/wrapper/gradle-wrapper.jar` were never committed — only `gradle-wrapper.properties` existed. Running the documented commands would fail with "No such file or directory".
+
+**Fix:** Generated and committed the Gradle 8.2 wrapper scripts and jar (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`), so the project builds with the documented commands out of the box.
 
 ---
 

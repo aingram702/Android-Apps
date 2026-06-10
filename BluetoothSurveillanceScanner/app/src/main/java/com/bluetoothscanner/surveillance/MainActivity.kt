@@ -27,19 +27,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: DeviceAdapter
     private var isScanning = false
 
-    private val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-    } else {
-        arrayOf(
-            Manifest.permission.BLUETOOTH,
-            Manifest.permission.BLUETOOTH_ADMIN,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-    }
+    private val requiredPermissions: Array<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            add(Manifest.permission.BLUETOOTH)
+            add(Manifest.permission.BLUETOOTH_ADMIN)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        // Required on Android 13+ to display any notification, including the
+        // foreground-service notification and HIGH RISK alerts.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }.toTypedArray()
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -47,7 +50,7 @@ class MainActivity : AppCompatActivity() {
         if (results.values.all { it }) {
             checkPermissionsAndScan()
         } else {
-            Toast.makeText(this, "Bluetooth permissions required to scan", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Bluetooth, location, and notification permissions are required to scan", Toast.LENGTH_LONG).show()
         }
     }
 

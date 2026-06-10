@@ -23,6 +23,9 @@
     <!-- Vibration for alerts -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Required on Android 13+ to show the foreground-service notification and HIGH RISK alerts -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
