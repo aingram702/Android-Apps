@@ -100,6 +100,12 @@ class MainActivity : AppCompatActivity() {
             updateCounters()
         }
 
+        // Recover the correct UI state if the service is already running
+        // (e.g. after a screen rotation recreates this activity).
+        isScanning = ScanService.isRunning
+        if (isScanning) {
+            binding.tvStatus.text = "Scanning for surveillance devices…"
+        }
         updateFabLabel()
     }
 

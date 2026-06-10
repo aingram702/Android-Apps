@@ -340,12 +340,34 @@ A follow-up code review (after the initial crash-fix round) found and fixed the 
 
 ---
 
+## Fourth Review Pass — Additional Fixes
+
+### BUG-7 — FAB/status UI desynced from the running service after activity recreation
+**Severity:** Medium  
+**File:** `MainActivity.kt` / `ScanService.kt`
+
+**Issue:** `MainActivity` tracked scan state purely in the local `isScanning` field, initialized to `false`. The `ScanService` is a separate component that keeps running across activity recreations (e.g. screen rotation, returning to the app after it was backgrounded and the activity was destroyed). When `MainActivity` was recreated while `ScanService` was still active, `isScanning` reset to `false`, so the FAB showed "Start Scan" and the status text was blank — even though scanning was actively running in the background. Tapping "Start Scan" in this state would call `checkPermissionsAndScan()` → `startScanning()` again, redundantly restarting the foreground service.
+
+**Fix:** Added a `@Volatile companion var isRunning` flag to `ScanService`, set to `true` in `onCreate()` and `false` in `onDestroy()`. `MainActivity.onCreate()` now initializes `isScanning = ScanService.isRunning` and restores the "Scanning for surveillance devices…" status text when the service is already running, so the FAB and status correctly reflect the real service state immediately after recreation.
+
+---
+
+### BUG-8 — Toggling Bluetooth off and back on permanently stalled scanning
+**Severity:** High  
+**File:** `ScanService.kt`
+
+**Issue:** `startLeScanning()` and `startClassicScan()` both early-return if `isLeScanning` / scanning is already considered active, and `BluetoothLeScanner.startScan()` simply does nothing once the adapter is off. If the user turned Bluetooth off (e.g. from Quick Settings) while `ScanService` was running, the OS silently stopped both the BLE scan and Classic discovery, but `isLeScanning` and `isClassicScanning` remained `true`. When Bluetooth was turned back on, nothing in the service re-triggered scanning — `startLeScanning()`'s early-return blocked any restart, and Classic discovery was never resumed — so the foreground notification kept showing "Scanning…" while no scanning was actually happening, with no way to recover short of stopping and restarting the service.
+
+**Fix:** Added a `bluetoothStateReceiver` registered on `BluetoothAdapter.ACTION_STATE_CHANGED` (via `ContextCompat.registerReceiver(..., RECEIVER_NOT_EXPORTED)`). On `STATE_OFF` it resets `isLeScanning`/`isClassicScanning` to `false` and posts a status update. On `STATE_ON` it refreshes the `BluetoothLeScanner` reference and calls `startLeScanning()` / `startClassicScan()` again, restoring full scanning automatically. The receiver is registered in `onCreate()` and unregistered in `onDestroy()` alongside the existing Classic-scan receiver.
+
+---
+
 ## Limitations & Notes
 
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
 - **Classic Bluetooth** discovery takes approximately 12 seconds per cycle and requires the remote device to be in discoverable mode. Many spy devices only use BLE.
 - **MAC OUI matching** is heuristic — the same chip vendor supplies components for both legitimate consumer devices and spy hardware. MEDIUM-risk flags for OUI matches should be investigated, not treated as confirmed.
-- **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure, the FAB may show "Stop Scan" while no scan is actually running. Tapping "Stop Scan" then "Start Scan" will recover the state.
+- **`isScanning` UI flag** — if the OS kills the foreground service due to memory pressure (rather than the activity being recreated), the FAB may still show "Stop Scan" while no scan is actually running, since `ScanService.isRunning` would also be reset to `false` only if `onDestroy()` runs. Tapping "Stop Scan" then "Start Scan" will recover the state.
 - **Location permission** is not used for location purposes — Android mandates it for any app that performs Bluetooth scanning on API 23–30.
 - The app does **not** connect to any detected device, only passively observes advertisements and inquiry responses.
 
