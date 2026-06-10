@@ -97,14 +97,20 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnClear.setOnClickListener {
             adapter.clear()
+            ScanService.clearKnownDevices()
             updateCounters()
         }
 
         // Recover the correct UI state if the service is already running
-        // (e.g. after a screen rotation recreates this activity).
+        // (e.g. after a screen rotation recreates this activity), including
+        // repopulating the device list from the service's running snapshot —
+        // a fresh DeviceAdapter would otherwise start out empty.
         isScanning = ScanService.isRunning
         if (isScanning) {
             binding.tvStatus.text = "Scanning for surveillance devices…"
+            ScanService.getKnownDevices().forEach { adapter.upsert(it) }
+            adapter.sortByThreat()
+            updateCounters()
         }
         updateFabLabel()
     }

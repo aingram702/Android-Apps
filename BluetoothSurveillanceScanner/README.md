@@ -362,6 +362,28 @@ A follow-up code review (after the initial crash-fix round) found and fixed the 
 
 ---
 
+## Fifth Review Pass — Additional Fixes
+
+### BUG-9 — High-risk alert re-vibrated continuously while a tracker stayed in range
+**Severity:** High  
+**File:** `ScanService.kt`
+
+**Issue:** `processDevice()` called `sendHighRiskAlert()` for every HIGH-risk detection, completely independent of `broadcastDevice()`'s 2-second throttle. A BLE device can advertise 5–10+ times per second, so a nearby AirTag or other HIGH-risk tracker caused `notifManager.notify()` to be called at that same rate. Since `NotificationCompat` defaults to re-alerting (sound/vibration/heads-up) on every update to a notification ID, the phone vibrated continuously and near-constantly the entire time the tracker was in range — far from the "instant alert" the feature is meant to provide, and a significant battery/annoyance issue.
+
+**Fix:** `broadcastDevice()` now returns `Boolean` (true only when it actually sends a broadcast, i.e. not throttled), and `sendHighRiskAlert()` is only called when that returns `true` — capping alert updates to once per 2 seconds per device. Additionally, `.setOnlyAlertOnce(true)` was added to the alert notification builder, so the vibration/heads-up only fires the first time a device is flagged HIGH risk; later updates (e.g. refreshed signal strength) silently update the existing notification.
+
+---
+
+### BUG-10 — Device list reset to empty after activity recreation while scanning continued
+**Severity:** Medium  
+**File:** `ScanService.kt` / `MainActivity.kt`
+
+**Issue:** The Fourth Review Pass fixed the FAB/status text desync after activity recreation (e.g. screen rotation) via `ScanService.isRunning`, but the device list itself lived only in `MainActivity`'s `DeviceAdapter`. A fresh `DeviceAdapter` instance starts empty, so after rotation the list showed zero devices and "Devices: 0 | High Risk: 0 | Suspicious: 0" — even though `ScanService` was still running and had already identified several devices, some of which might not re-broadcast for a while (BLE advertisement throttling/intervals).
+
+**Fix:** `ScanService` now keeps a `ConcurrentHashMap<String, BtDeviceInfo>` snapshot (`knownDevices`) of every device seen this session, updated alongside each non-throttled broadcast in `broadcastDevice()`. `MainActivity.onCreate()` repopulates `adapter` from `ScanService.getKnownDevices()` and re-sorts/recomputes counters whenever it detects the service is already running. The "Clear" button now also calls `ScanService.clearKnownDevices()` so a manual clear isn't undone by the next rotation.
+
+---
+
 ## Limitations & Notes
 
 - **BLE-only devices** (like AirTags) are only visible during their advertisement windows. Apple's AirTag rotates its MAC address periodically to prevent tracking — this app will show it as a new device each rotation cycle.
