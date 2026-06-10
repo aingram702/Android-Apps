@@ -233,13 +233,26 @@ class ScanService : Service() {
         lastBroadcastTime[info.address] = now
 
         knownDevices.merge(info.address, info) { old, new ->
-            new.copy(firstSeen = old.firstSeen, seenCount = old.seenCount + 1)
+            // BLE advertisements often omit the name the device sent earlier, and a
+            // name-based HIGH classification would then downgrade to UNKNOWN. Keep
+            // the best-known name/manufacturer and the most severe classification.
+            val sticky = if (new.threatLevel.ordinal <= old.threatLevel.ordinal) new else old
+            new.copy(
+                name = new.name ?: old.name,
+                manufacturer = new.manufacturer ?: old.manufacturer,
+                threatLevel = sticky.threatLevel,
+                threatReason = sticky.threatReason,
+                firstSeen = old.firstSeen,
+                seenCount = old.seenCount + 1
+            )
         }
 
         val intent = Intent(ACTION_DEVICE_FOUND).apply {
             setPackage(packageName)
             putExtra(EXTRA_DEVICE, info.address)
-            putExtra("name", info.displayName)
+            // Raw name, not displayName: sending the "Unknown Device" placeholder
+            // would permanently mask a real name that arrives in a later packet.
+            putExtra("name", info.name ?: "")
             putExtra("rssi", info.rssi)
             putExtra("type", info.deviceType)
             putExtra("threat", info.threatLevel.name)
