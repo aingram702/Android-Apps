@@ -46,6 +46,15 @@ class ScanService : Service() {
         @Volatile
         var isRunning = false
             private set
+
+        // Snapshot of every device seen this scan session, keyed by MAC address.
+        // Lets MainActivity repopulate its list after being recreated (e.g. screen
+        // rotation) while ScanService keeps running in the background.
+        private val knownDevices = ConcurrentHashMap<String, BtDeviceInfo>()
+
+        fun getKnownDevices(): List<BtDeviceInfo> = knownDevices.values.toList()
+
+        fun clearKnownDevices() = knownDevices.clear()
     }
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -209,17 +218,23 @@ class ScanService : Service() {
     private fun processDevice(device: BluetoothDevice, rssi: Int, type: String) {
         if (!hasBluetoothPermission()) return
         val info = SurveillanceDetector.analyze(device, rssi, type)
-        broadcastDevice(info)
-        if (info.threatLevel == BtDeviceInfo.ThreatLevel.HIGH) {
+        // Only act on broadcasts that actually go out — BLE devices can advertise
+        // many times per second, and gating on the throttle keeps both the UI
+        // broadcast and the high-risk alert from firing at that rate.
+        if (broadcastDevice(info) && info.threatLevel == BtDeviceInfo.ThreatLevel.HIGH) {
             sendHighRiskAlert(info)
         }
     }
 
-    private fun broadcastDevice(info: BtDeviceInfo) {
+    private fun broadcastDevice(info: BtDeviceInfo): Boolean {
         val now = System.currentTimeMillis()
         val lastSent = lastBroadcastTime[info.address] ?: 0L
-        if (now - lastSent < BROADCAST_THROTTLE_MS) return
+        if (now - lastSent < BROADCAST_THROTTLE_MS) return false
         lastBroadcastTime[info.address] = now
+
+        knownDevices.merge(info.address, info) { old, new ->
+            new.copy(firstSeen = old.firstSeen, seenCount = old.seenCount + 1)
+        }
 
         val intent = Intent(ACTION_DEVICE_FOUND).apply {
             setPackage(packageName)
@@ -232,6 +247,7 @@ class ScanService : Service() {
             putExtra("manufacturer", info.manufacturer ?: "")
         }
         sendBroadcast(intent)
+        return true
     }
 
     private fun broadcastStatus(status: String) {
@@ -259,6 +275,9 @@ class ScanService : Service() {
             .setVibrate(longArrayOf(0, 500, 200, 500))
             .setContentIntent(launchIntent)
             .setAutoCancel(true)
+            // Re-using the same notification ID updates it in place on subsequent
+            // sightings; without this, every update would re-vibrate/re-alert too.
+            .setOnlyAlertOnce(true)
             .build()
         // computeIfAbsent is atomic on ConcurrentHashMap; getOrPut is not and can race
         // when the same device is detected by the BLE and Classic scan threads at once.
